@@ -1,0 +1,144 @@
+---
+- hosts: request-mirror-host
+  gather_facts: true
+  remote_user: root
+
+  pre_tasks:
+    - name: update repositories
+      apt: update_cache=yes
+    - name: Install apt dependencies
+      apt:
+        name:
+          - libpq-dev
+          - libc6
+          - postgresql
+          - git
+          - python3-psycopg2
+          - gcc
+          - curl
+        state: present
+        update_cache: true
+
+  vars:
+    db_user: request_mirror
+    db_password: password
+    db_name: request_mirror_db
+    git_branch: main 
+
+  tasks:
+  - name: Create requestmirror group
+    group:
+      name: requestmirror
+      state: present
+
+  - name: Create requestmirror user
+    user:
+      name: requestmirror
+      groups: requestmirror
+      shell: /sbin/nologin
+      append: yes
+      state: present
+      create_home: no
+
+  - name: Create app database
+    postgresql_db:
+      state: present
+      name: "{{ db_name }}"
+    become: yes
+    become_user: postgres
+
+  - name: Create db user
+    postgresql_user:
+      state: present
+      name: "{{ db_user }}"
+      password: "{{ db_password }}"
+    become: yes
+    become_user: postgres
+
+  - name: Grant db user access to app db
+    postgresql_privs:
+      type: database
+      database: "{{ db_name }}"
+      roles: "{{ db_user }}"
+      grant_option: no
+      privs: all
+    become: yes
+    become_user: postgres
+
+  - name: Grant db user access to schema public
+    postgresql_privs:
+      type: schema
+      database: "{{ db_name }}"
+      roles: "{{ db_user }}"
+      privs: all
+      objs: public
+    become: yes
+    become_user: postgres
+
+  - name: Check if cargo is installed
+    shell: "command -v $HOME/.cargo/bin/cargo"
+    register: cargo_exists
+    ignore_errors: yes
+
+  - name: Download Installer
+    when: cargo_exists is failed
+    get_url:
+      url: https://sh.rustup.rs
+      dest: /tmp/sh.rustup.rs
+      mode: '0755'
+      force: 'yes'
+    tags:
+      - rust
+
+  - name: Install rust/cargo
+    when: cargo_exists is failed
+    shell: /tmp/sh.rustup.rs -y
+    tags:
+      - rust
+  - name: Clone a github repository
+    git:
+      repo: https://github.com/RaspberryProgramming/request-mirror
+      dest: /tmp/request-mirror
+      version: "{{git_branch}}"
+      clone: yes
+      update: yes
+
+  - name: Install diesel cli
+    shell: $HOME/.cargo/bin/cargo install diesel_cli --no-default-features --features postgres
+
+  - name: Deploy Database
+    shell:
+      $HOME/.cargo/bin/diesel migration run --database-url "postgres://{{db_user}}:{{db_password}}@localhost/{{db_name}}"
+      chdir=/tmp/request-mirror
+
+  - name: Build Project
+    shell:
+      $HOME/.cargo/bin/cargo install --path . --root /usr/local/
+      chdir=/tmp/request-mirror
+  
+  - name: "Allow port 80 for request-mirror"
+    shell: setcap 'cap_net_bind_service=+ep' /usr/local/bin/request-mirror
+ 
+  - name: "Create .env file"
+    copy:
+      dest: "/.env"
+      content: DATABASE_URL=postgres://{{db_user}}:{{db_password}}@localhost/{{db_name}}
+
+  - name: Copy systemd service file to server
+    copy:
+      src: request-mirror.service
+      dest: /etc/systemd/system
+      owner: root
+      group: root
+
+  - name: Copy templates from git repo
+    shell: cp -r /tmp/request-mirror/templates/ /
+
+  - name: Copy Rocket.toml
+    shell: cp /tmp/request-mirror/Rocket.toml /
+
+  - name: Start/Restart request-mirror
+    systemd:
+      name: request-mirror
+      state: restarted
+      enabled: yes

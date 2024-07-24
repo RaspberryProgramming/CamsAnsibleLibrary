@@ -1,0 +1,9 @@
+[Unit]
+Description=Request Mirror
+
+[Service]
+User=requestmirror
+ExecStart=/usr/local/bin/request-mirror
+
+[Install]
+WantedBy=multi-user.target
