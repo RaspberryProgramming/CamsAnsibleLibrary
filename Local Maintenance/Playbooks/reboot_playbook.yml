@@ -1,0 +1,5 @@
+- hosts: all
+  tasks:  
+  - name: Reboot machines
+    reboot:
+      post_reboot_delay: 60
